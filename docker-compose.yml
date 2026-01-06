@@ -1,0 +1,9 @@
+services:
+  telegram_voice_transcriber:
+    build: .
+    container_name: telegram_voice_transcriber
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    restart: unless-stopped
