@@ -1,6 +1,8 @@
 import io
 import asyncio
+import qrcode
 from telethon import TelegramClient, events, types, functions
+from telethon.errors import SessionPasswordNeededError
 from .config import Config
 from .transcriber import MistralTranscriber
 from .bot_sender import BotSender
@@ -17,8 +19,40 @@ class Userbot:
 
     async def start(self):
         logger.info("Подключение Userbot...")
-        await self.client.start()
-        
+        await self.client.connect()
+
+        # Проверка авторизации. Если нет сессии — запускаем QR логин
+        if not await self.client.is_user_authorized():
+            try:
+                logger.info("Сессия не найдена. Генерирую QR-код для входа...")
+                qr_login = await self.client.qr_login()
+                
+                # Генерация и вывод QR-кода в консоль
+                qr = qrcode.QRCode()
+                qr.add_data(qr_login.url)
+                qr.make(fit=True)
+                
+                print("\n" + "="*40)
+                # invert=True делает QR-код читаемым на темных фонах терминала
+                qr.print_ascii(invert=True)
+                print("="*40 + "\n")
+                
+                logger.info("Отсканируйте QR-код выше (Настройки -> Устройства -> Подключить устройство)")
+                
+                # Ожидание сканирования
+                await qr_login.wait()
+                logger.info("Вход выполнен успешно!")
+
+            except SessionPasswordNeededError:
+                # Если стоит 2FA (облачный пароль)
+                pw = input("Введите ваш облачный пароль (2FA): ")
+                await self.client.sign_in(password=pw)
+            except Exception as e:
+                logger.error(f"Ошибка входа по QR: {e}")
+                logger.info("Переключаюсь на стандартный вход (номер телефона)...")
+                await self.client.start()
+
+        # Получаем информацию о себе
         me = await self.client.get_me()
         self.my_id = me.id
         logger.info(f"Userbot запущен (ID: {self.my_id})")
@@ -51,6 +85,7 @@ class Userbot:
             if isinstance(reaction.peer_id, types.PeerUser):
                 peer_id = reaction.peer_id.user_id
             
+            # Проверяем, что реакция поставлена нами
             if peer_id == self.my_id:
                 emoji = None
                 if isinstance(reaction.reaction, types.ReactionEmoji):
@@ -82,7 +117,7 @@ class Userbot:
         try:
             message = await self.client.get_messages(peer, ids=msg_id)
             
-            if message and message.voice:
+            if message and (message.voice or message.round_message):
                 media_type = "Голосовое" if message.voice else "Видеосообщение"
                 logger.info(f"{media_type} найдено. Начинаю скачивание в память...")
                 
