@@ -1,7 +1,7 @@
 import io
 import asyncio
 import qrcode
-from telethon import TelegramClient, events, types, functions
+from telethon import TelegramClient, events, types, functions, utils
 from telethon.errors import SessionPasswordNeededError
 from .config import Config
 from .transcriber import MistralTranscriber
@@ -21,38 +21,30 @@ class Userbot:
         logger.info("Подключение Userbot...")
         await self.client.connect()
 
-        # Проверка авторизации. Если нет сессии — запускаем QR логин
         if not await self.client.is_user_authorized():
             try:
-                logger.info("Сессия не найдена. Генерирую QR-код для входа...")
+                logger.info("Сессия не найдена. Генерирую QR-код...")
                 qr_login = await self.client.qr_login()
                 
-                # Генерация и вывод QR-кода в консоль
                 qr = qrcode.QRCode()
                 qr.add_data(qr_login.url)
                 qr.make(fit=True)
                 
                 print("\n" + "="*40)
-                # invert=True делает QR-код читаемым на темных фонах терминала
                 qr.print_ascii(invert=True)
                 print("="*40 + "\n")
                 
-                logger.info("Отсканируйте QR-код выше (Настройки -> Устройства -> Подключить устройство)")
-                
-                # Ожидание сканирования
+                logger.info("Отсканируйте QR-код выше.")
                 await qr_login.wait()
                 logger.info("Вход выполнен успешно!")
 
             except SessionPasswordNeededError:
-                # Если стоит 2FA (облачный пароль)
                 pw = input("Введите ваш облачный пароль (2FA): ")
                 await self.client.sign_in(password=pw)
             except Exception as e:
                 logger.error(f"Ошибка входа по QR: {e}")
-                logger.info("Переключаюсь на стандартный вход (номер телефона)...")
                 await self.client.start()
 
-        # Получаем информацию о себе
         me = await self.client.get_me()
         self.my_id = me.id
         logger.info(f"Userbot запущен (ID: {self.my_id})")
@@ -85,14 +77,12 @@ class Userbot:
             if isinstance(reaction.peer_id, types.PeerUser):
                 peer_id = reaction.peer_id.user_id
             
-            # Проверяем, что реакция поставлена нами
             if peer_id == self.my_id:
                 emoji = None
                 if isinstance(reaction.reaction, types.ReactionEmoji):
                     emoji = reaction.reaction.emoticon
                 
                 if emoji == Config.TRIGGER_EMOJI:
-                    logger.info(f"НАЙДЕНА РЕАКЦИЯ {Config.TRIGGER_EMOJI} в сообщении {msg_id}!")
                     target_found = True
                 else:
                     reactions_to_keep.append(reaction.reaction)
@@ -102,43 +92,57 @@ class Userbot:
             asyncio.create_task(self._process_voice(peer, msg_id))
 
     async def _remove_reaction(self, peer, msg_id, reactions_to_keep):
-        logger.info("Попытка удаления реакции...")
         try:
             await self.client(functions.messages.SendReactionRequest(
                 peer=peer,
                 msg_id=msg_id,
                 reaction=reactions_to_keep 
             ))
-            logger.info("Реакция успешно удалена.")
-        except Exception as e:
-            logger.error(f"Не удалось удалить реакцию: {e}")
+        except Exception:
+            pass
 
     async def _process_voice(self, peer, msg_id):
         try:
             message = await self.client.get_messages(peer, ids=msg_id)
             
             if message and (message.voice or message.round_message):
-                media_type = "Голосовое" if message.voice else "Видеосообщение"
-                logger.info(f"{media_type} найдено. Начинаю скачивание в память...")
-                
+                logger.info(f"Начало обработки сообщения {msg_id}...")
+
+                # 1. Получаем информацию о чате
+                chat = await message.get_chat()
+                # Если у чата есть атрибут title (группа/канал), берем его. Иначе - это ЛС.
+                chat_title = getattr(chat, 'title', 'Личные сообщения')
+
+                # 2. Получаем информацию об отправителе
+                sender = await message.get_sender()
+                sender_name = "Неизвестный"
+                username_str = ""
+
+                if sender:
+                    sender_name = utils.get_display_name(sender)
+                    if hasattr(sender, 'username') and sender.username:
+                        username_str = f"(@{sender.username})"
+
+                # 3. Скачиваем аудио
                 file_bytes = io.BytesIO()
-                
                 await self.client.download_media(message, file=file_bytes)
-                
                 audio_data = file_bytes.getvalue()
-                logger.info(f"Скачано {len(audio_data)} байт. Передаю в Mistral...")
 
+                # 4. Транскрибируем
                 text = await self.transcriber.transcribe(audio_data)
-                logger.info("Транскрипция завершена.")
 
-                header = f"🎤 Расшифровка ({media_type}) (ID: {msg_id})\n\n"
+                # 5. Формируем сообщение (Обычный текст без HTML)
+                response_text = (
+                    f"Чат: {chat_title}\n"
+                    f"От: {sender_name} {username_str}\n"
+                    f"--------------------\n\n"
+                    f"{text}"
+                )
                 
-                await self.bot_sender.send_message(self.my_id, header + text)
+                await self.bot_sender.send_message(self.my_id, response_text)
 
             elif message:
-                logger.warning("Сообщение найдено, но в нем нет голосового или кружочка.")
-            else:
-                logger.warning("Не удалось получить объект сообщения по ID.")
+                logger.warning("Сообщение не содержит голосового или видео.")
 
         except Exception as e:
-            logger.error(f"Критическая ошибка обработки: {e}", exc_info=True)
+            logger.error(f"Ошибка обработки: {e}", exc_info=True)
