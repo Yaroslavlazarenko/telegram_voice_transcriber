@@ -18,3 +18,4 @@ class Config:
 
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     TRIGGER_EMOJI = os.getenv("TRIGGER_EMOJI", "✍")
+    
