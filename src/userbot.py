@@ -16,6 +16,7 @@ class Userbot:
         self.transcriber = MistralTranscriber()
         self.bot_sender = BotSender()
         self.my_id = None
+        self.MAX_MSG_LEN = 4000 # Лимит с запасом
 
     async def start(self):
         await self.client.connect()
@@ -72,49 +73,73 @@ class Userbot:
     async def _process_media(self, peer, msg_id):
         try:
             m = await self.client.get_messages(peer, ids=msg_id)
-            if not m: return
+            if not m or not (m.voice or m.video_note): return
 
-            # ИСПРАВЛЕНО: Telethon использует .voice и .video_note
-            is_voice = bool(m.voice)
-            is_video_note = bool(m.video_note)
-
-            if not (is_voice or is_video_note):
-                logger.warning(f"Сообщение {msg_id} не является голосовым или кружочком.")
-                return
-
-            ext = "video.mp4" if is_video_note else "voice.ogg"
-            label = "Кружочек" if is_video_note else "Голосовое"
+            is_video = bool(m.video_note)
+            ext = "video.mp4" if is_video else "voice.ogg"
+            label = "Кружочек" if is_video else "Голосовое"
 
             chat = await m.get_chat()
             sender = await m.get_sender()
             chat_title = getattr(chat, 'title', 'Личные сообщения')
             sender_name = utils.get_display_name(sender) if sender else "Неизвестный"
 
-            logger.info(f"Обработка {label} от {sender_name}...")
-            
+            logger.info(f"Скачивание {label} от {sender_name}...")
             file_bytes = io.BytesIO()
             await self.client.download_media(m, file=file_bytes)
             
-            text = await self.transcriber.transcribe(file_bytes.getvalue(), ext)
-
-            safe_text = html.escape(text)
+            # 1. Получаем полный текст транскрипции
+            raw_text = await self.transcriber.transcribe(file_bytes.getvalue(), ext)
+            
+            # Экранируем спецсимволы
             safe_chat = html.escape(chat_title)
             safe_sender = html.escape(sender_name)
-
-            response = (
+            safe_text = html.escape(raw_text)
+            
+            # 2. Формируем "шапку" описания
+            header = (
                 f"<b>Чат:</b> {safe_chat}\n"
                 f"<b>От:</b> {safe_sender}\n"
                 f"<b>Тип:</b> {label}\n"
                 f"--------------------\n\n"
-                f"{safe_text}"
             )
+            
+            msg_link = self._get_msg_link(chat, msg_id)
+            
+            # 3. Логика разбивки на части
+            parts = []
+            
+            if len(header + safe_text) <= self.MAX_MSG_LEN:
+                # Всё влезает в одно сообщение
+                parts.append(header + safe_text)
+            else:
+                # В первое сообщение кладем шапку и сколько влезет текста
+                space_in_first = self.MAX_MSG_LEN - len(header)
+                parts.append(header + safe_text[:space_in_first])
+                
+                # Остальной текст режем на куски по MAX_MSG_LEN
+                remaining_text = safe_text[space_in_first:]
+                for i in range(0, len(remaining_text), self.MAX_MSG_LEN):
+                    parts.append(remaining_text[i : i + self.MAX_MSG_LEN])
 
-            await self.bot_sender.send_message(
-                self.my_id, 
-                response, 
-                "🔗 Перейти к сообщению", 
-                self._get_msg_link(chat, msg_id)
-            )
+            # 4. Отправка частей
+            for i, part_content in enumerate(parts):
+                is_last = (i == len(parts) - 1)
+                
+                # Кнопку прикрепляем только к последней части
+                btn_text = "🔗 Перейти к сообщению" if is_last else None
+                btn_url = msg_link if is_last else None
+                
+                await self.bot_sender.send_message(
+                    chat_id=self.my_id,
+                    text=part_content,
+                    button_text=btn_text,
+                    button_url=btn_url
+                )
+                
+                # Небольшая пауза между отправками, чтобы Telegram не забанил за спам
+                if not is_last:
+                    await asyncio.sleep(0.5)
 
         except Exception as e:
             logger.error(f"Ошибка в _process_media: {e}", exc_info=True)
