@@ -100,6 +100,16 @@ class Userbot:
             ))
         except Exception:
             pass
+    
+    def _get_message_link(self, chat, message_id):
+        try:
+            if hasattr(chat, 'username') and chat.username:
+                return f"https://t.me/{chat.username}/{message_id}"
+            
+            chat_id_str = str(chat.id).replace("-100", "")
+            return f"https://t.me/c/{chat_id_str}/{message_id}"
+        except Exception:
+            return None
 
     async def _process_voice(self, peer, msg_id):
         try:
@@ -108,38 +118,38 @@ class Userbot:
             if message and (message.voice or message.round_message):
                 logger.info(f"Начало обработки сообщения {msg_id}...")
 
-                # 1. Получаем информацию о чате
                 chat = await message.get_chat()
-                # Если у чата есть атрибут title (группа/канал), берем его. Иначе - это ЛС.
                 chat_title = getattr(chat, 'title', 'Личные сообщения')
 
-                # 2. Получаем информацию об отправителе
                 sender = await message.get_sender()
                 sender_name = "Неизвестный"
-                username_str = ""
-
                 if sender:
                     sender_name = utils.get_display_name(sender)
-                    if hasattr(sender, 'username') and sender.username:
-                        username_str = f"(@{sender.username})"
+                
+                # Получаем ссылку, но не добавляем её в текст
+                msg_link = self._get_message_link(chat, message.id)
 
-                # 3. Скачиваем аудио
                 file_bytes = io.BytesIO()
                 await self.client.download_media(message, file=file_bytes)
                 audio_data = file_bytes.getvalue()
 
-                # 4. Транскрибируем
                 text = await self.transcriber.transcribe(audio_data)
 
-                # 5. Формируем сообщение (Обычный текст без HTML)
+                # Текст стал чище, без HTML-ссылки
                 response_text = (
-                    f"Чат: {chat_title}\n"
-                    f"От: {sender_name} {username_str}\n"
+                    f"<b>Чат:</b> {chat_title}\n"
+                    f"<b>От:</b> {sender_name}\n"
                     f"--------------------\n\n"
                     f"{text}"
                 )
                 
-                await self.bot_sender.send_message(self.my_id, response_text)
+                # Передаем параметры для кнопки
+                await self.bot_sender.send_message(
+                    chat_id=self.my_id, 
+                    text=response_text,
+                    button_text="🔗 Перейти к сообщению",
+                    button_url=msg_link
+                )
 
             elif message:
                 logger.warning("Сообщение не содержит голосового или видео.")
