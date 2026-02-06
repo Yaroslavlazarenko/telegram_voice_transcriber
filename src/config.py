@@ -6,14 +6,15 @@ load_dotenv()
 class Config:
     API_ID = int(os.getenv("API_ID", 0))
     API_HASH = os.getenv("API_HASH")
-    SESSION_NAME = os.getenv("SESSION_NAME")
+    SESSION_NAME = os.getenv("SESSION_NAME", "voice_transcriber")
     
     MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
     MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "voxtral-mini-latest")
+    MISTRAL_AUDIO_MODEL = os.getenv("MISTRAL_AUDIO_MODEL", "voxtral-mini-2602")
     
-    TARGET_LANGUAGE = os.getenv("TARGET_LANGUAGE", "")
+    TARGET_LANGUAGE = os.getenv("TARGET_LANGUAGE", "Русский")
     SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT")
     TRANSCRIBE_PROMPT = os.getenv("TRANSCRIBE_PROMPT")
 
     BOT_TOKEN = os.getenv("BOT_TOKEN")
-    TRIGGER_EMOJI = os.getenv("TRIGGER_EMOJI")
+    TRIGGER_EMOJI = os.getenv("TRIGGER_EMOJI", "✍")
