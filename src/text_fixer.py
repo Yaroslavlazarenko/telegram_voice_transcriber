@@ -8,22 +8,23 @@ logger = setup_logger("TextFixer")
 class MistralTextFixer:
     def __init__(self):
         self.client = Mistral(api_key=Config.MISTRAL_API_KEY)
-        # nemo — самая стабильная и быстрая модель для простых правок
         self.model = "mistral-medium-latest"
 
     async def fix_punctuation(self, text: str) -> str:
-        # Запускаем синхронную функцию в отдельном потоке, чтобы не вешать бота
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._fix_sync, text)
 
     def _fix_sync(self, text: str) -> str:
         prompt = (
-            "Ты — профессиональный корректор. Твоя единственная задача: расставить знаки препинания (запятые, тире, дефисы, точки). "
-            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: менять слова, исправлять ошибки в словах, менять сленг, регистр букв или удалять мат. "
-            "Оставляй текст в оригинальном виде, добавляй ТОЛЬКО пунктуацию."
+            "Ты — профессиональный корректор для чатов. Твоя задача: расставить знаки препинания (запятые, дефисы).\n"
+            "ПРАВИЛА:\n"
+            "1. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: менять слова, исправлять ошибки в словах, менять сленг, регистр букв или удалять мат.\n"
+            "2. Используй ТОЛЬКО короткие дефисы (-) вместо длинных тире (—).\n"
+            "3. НЕ СТАВЬ точку в самом конце всего сообщения.\n"
+            "4. Оставляй текст максимально оригинальным, добавляй только пунктуацию."
         )
         try:
-            logger.info(f"Отправка текста в Mistral ({self.model})...")
+            logger.info(f"Отправка в Mistral ({self.model})...")
             response = self.client.chat.complete(
                 model=self.model,
                 messages=[
@@ -32,8 +33,15 @@ class MistralTextFixer:
                 ]
             )
             result = response.choices[0].message.content
-            logger.info("Ответ от Mistral получен.")
+            
+            result = result.replace(" — ", " - ").replace("—", "-")
+            
+            result = result.strip()
+            if result.endswith('.') and not text.endswith('.'):
+                result = result[:-1]
+            
+            logger.info("Ответ от Mistral получен и обработан.")
             return result
         except Exception as e:
-            logger.error(f"Ошибка в синхронном TextFixer: {e}")
+            logger.error(f"Ошибка в TextFixer: {e}")
             return text
