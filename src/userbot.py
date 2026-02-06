@@ -107,15 +107,18 @@ class Userbot:
     async def _process_text_fix(self, m):
         try:
             original_text = m.text
-            logger.info(f"Исправление пунктуации для сообщения {m.id}...")
+            logger.info(f"Начинаю правку сообщения {m.id}...")
             
+            # Ждем результат от фиксера
             fixed = await self.fixer.fix_punctuation(original_text)
             
-            # Если нейросеть ничего не изменила, не спамим в личку
+            logger.info(f"Правка завершена. Сравниваю результаты...")
+
             if fixed.strip() == original_text.strip():
-                logger.info("Изменений не требуется.")
+                logger.info("Изменений не обнаружено.")
                 return
 
+            # Дальнейшая логика формирования кнопки и отправки...
             fix_id = str(uuid.uuid4())[:8]
             chat = await m.get_chat()
             
@@ -138,8 +141,10 @@ class Userbot:
                 button_text="Применить ✅",
                 button_url=f"fix:{fix_id}"
             )
+            logger.info(f"Сообщение с правками отправлено в ЛС (ID: {self.my_id})")
+
         except Exception as e:
-            logger.error(f"Ошибка фикса: {e}")
+            logger.error(f"Ошибка в _process_text_fix: {e}", exc_info=True)
 
     async def bot_callback_handler(self, event):
         data = event.data.decode()
