@@ -10,10 +10,6 @@ class BotSender:
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
     async def send_message(self, chat_id: int, text: str, button_text: str = None, button_url: str = None):
-        if not self.token:
-            logger.warning("Токен бота не указан!")
-            return
-
         async with aiohttp.ClientSession() as session:
             payload = {
                 "chat_id": chat_id,
@@ -23,14 +19,15 @@ class BotSender:
             }
 
             if button_text and button_url:
-                payload["reply_markup"] = {
-                    "inline_keyboard": [[{"text": button_text, "url": button_url}]]
-                }
+                # Если button_url начинается на http - это ссылка, иначе - данные для кнопки
+                kb_item = {"text": button_text}
+                if button_url.startswith("http"):
+                    kb_item["url"] = button_url
+                else:
+                    kb_item["callback_data"] = button_url
+                
+                payload["reply_markup"] = {"inline_keyboard": [[kb_item]]}
 
-            try:
-                async with session.post(self.base_url, json=payload) as resp:
-                    if resp.status != 200:
-                        err_text = await resp.text()
-                        logger.error(f"Ошибка отправки (Status {resp.status}): {err_text}")
-            except Exception as e:
-                logger.error(f"Ошибка связи с Bot API: {e}")
+            async with session.post(self.base_url, json=payload) as resp:
+                if resp.status != 200:
+                    logger.error(f"Ошибка Bot API: {await resp.text()}")
