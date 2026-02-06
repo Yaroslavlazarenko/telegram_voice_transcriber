@@ -34,7 +34,7 @@ class MistralTextFixer:
             )
             result = response.choices[0].message.content
             
-            result = result.replace(" — ", " - ").replace("—", "-")
+            result = result.replace(" — ", " - ").replace("—", "-").replace("–", "-").replace(" – ", " - ")
             
             result = result.strip()
             if result.endswith('.') and not text.endswith('.'):
