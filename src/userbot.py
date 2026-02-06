@@ -20,6 +20,7 @@ class Userbot:
     async def start(self):
         await self.client.connect()
         if not await self.client.is_user_authorized():
+            logger.info("Генерация QR-кода...")
             qr_login = await self.client.qr_login()
             qr = qrcode.QRCode()
             qr.add_data(qr_login.url)
@@ -31,7 +32,6 @@ class Userbot:
         self.my_id = me.id
         logger.info(f"Userbot запущен (ID: {self.my_id})")
 
-        # Raw обработчик для реакций
         self.client.add_event_handler(self.reaction_handler, events.Raw())
         await self.client.run_until_disconnected()
 
@@ -43,8 +43,8 @@ class Userbot:
         target_found = False
         reactions_to_keep = []
 
-        if event.message.reactions.recent_reactions:
-            for r in event.message.reactions.recent_reactions:
+        if msg.reactions.recent_reactions:
+            for r in msg.reactions.recent_reactions:
                 uid = r.peer_id.user_id if isinstance(r.peer_id, types.PeerUser) else None
                 if uid == self.my_id:
                     emoji = r.reaction.emoticon if isinstance(r.reaction, types.ReactionEmoji) else None
@@ -55,7 +55,6 @@ class Userbot:
 
         if target_found:
             try:
-                # Снимаем только свою триггер-реакцию
                 await self.client(functions.messages.SendReactionRequest(
                     peer=msg.peer_id, msg_id=msg.id, reaction=reactions_to_keep
                 ))
@@ -73,12 +72,18 @@ class Userbot:
     async def _process_media(self, peer, msg_id):
         try:
             m = await self.client.get_messages(peer, ids=msg_id)
-            if not m or not (m.voice or m.round_message):
+            if not m: return
+
+            # ИСПРАВЛЕНО: Telethon использует .voice и .video_note
+            is_voice = bool(m.voice)
+            is_video_note = bool(m.video_note)
+
+            if not (is_voice or is_video_note):
+                logger.warning(f"Сообщение {msg_id} не является голосовым или кружочком.")
                 return
 
-            is_round = bool(m.round_message)
-            ext = "video.mp4" if is_round else "voice.ogg"
-            label = "Кружочек" if is_round else "Голосовое"
+            ext = "video.mp4" if is_video_note else "voice.ogg"
+            label = "Кружочек" if is_video_note else "Голосовое"
 
             chat = await m.get_chat()
             sender = await m.get_sender()
@@ -90,10 +95,8 @@ class Userbot:
             file_bytes = io.BytesIO()
             await self.client.download_media(m, file=file_bytes)
             
-            # Транскрипция
             text = await self.transcriber.transcribe(file_bytes.getvalue(), ext)
 
-            # Экранирование HTML (ВАЖНО для Bot API)
             safe_text = html.escape(text)
             safe_chat = html.escape(chat_title)
             safe_sender = html.escape(sender_name)
