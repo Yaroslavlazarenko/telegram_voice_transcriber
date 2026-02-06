@@ -235,7 +235,9 @@ class Userbot:
                 await event.answer("Генерирую Summary... 🧠")
                 summary = await self.summarizer.summarize(cached["text"])
                 
-                resp = f"📋 <b>Summary сообщения:</b>\n\n{html.escape(summary)}"
+                safe_summary = html.escape(summary)
+                resp = f"📋 <b>Summary сообщения:</b>\n\n{safe_summary}"
+                
                 await self.bot_sender.send_message(
                     chat_id=self.my_id,
                     text=resp,
