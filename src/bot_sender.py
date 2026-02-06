@@ -1,4 +1,6 @@
 import aiohttp
+import re
+import html
 from .config import Config
 from .logger import setup_logger
 
@@ -9,10 +11,11 @@ class BotSender:
         self.token = Config.BOT_TOKEN
         self.base_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
+    def _strip_html(self, text):
+        """Удаляет все HTML теги из текста"""
+        return re.sub(r'<[^>]*>', '', text)
+
     async def send_message(self, chat_id: int, text: str, buttons: list = None):
-        """
-        buttons: список кортежей [("Текст", "url_или_callback"), ...]
-        """
         async with aiohttp.ClientSession() as session:
             payload = {
                 "chat_id": chat_id,
@@ -30,7 +33,24 @@ class BotSender:
                     else:
                         kb_item["callback_data"] = b_val
                     inline_kb.append(kb_item)
-                
                 payload["reply_markup"] = {"inline_keyboard": [inline_kb]}
 
-            await session.post(self.base_url, json=payload)
+            async with session.post(self.base_url, json=payload) as resp:
+                status = resp.status
+                body = await resp.text()
+
+                # Если ошибка в HTML тегах (код 400 и специфичное сообщение)
+                if status == 400 and "can't parse entities" in body:
+                    logger.warning("Ошибка HTML парсинга. Пробую отправить plain text...")
+                    
+                    # ФАЛЛБЕК: Чистим текст от тегов и экранируем
+                    clean_text = self._strip_html(text)
+                    payload["text"] = html.escape(clean_text)
+                    payload["parse_mode"] = "HTML" # Теперь это безопасно, так как всё экранировано
+                    
+                    async with session.post(self.base_url, json=payload) as retry_resp:
+                        if retry_resp.status != 200:
+                            logger.error(f"Фаллбек тоже не удался: {await retry_resp.text()}")
+                
+                elif status != 200:
+                    logger.error(f"Ошибка Bot API (Status {status}): {body}")
