@@ -9,7 +9,8 @@ logger = setup_logger("Transcriber")
 class MistralTranscriber:
     def __init__(self):
         self.client = Mistral(api_key=Config.MISTRAL_API_KEY)
-        self.model = Config.MISTRAL_AUDIO_MODEL
+        # Используем проверенную в тестах модель
+        self.model = "voxtral-mini-2602"
 
     async def transcribe(self, media_bytes: bytes, filename: str) -> str:
         loop = asyncio.get_running_loop()
@@ -19,20 +20,23 @@ class MistralTranscriber:
         try:
             logger.info(f"Транскрипция {filename} через {self.model}...")
             
-            # В Audio API инструкции передаются через параметр 'prompt'
-            full_prompt = f"{Config.TRANSCRIBE_PROMPT}. Язык: {Config.TARGET_LANGUAGE}."
-            
+            # В этом API передаем только модель и файл. 
+            # Параметр 'prompt' здесь не поддерживается SDK Mistral.
             response = self.client.audio.transcriptions.complete(
                 model=self.model,
                 file={
                     "content": media_bytes,
                     "file_name": filename,
-                },
-                prompt=full_prompt # Передаем инструкции здесь
+                }
             )
 
+            # Извлекаем текст
             result = getattr(response, 'text', str(response))
-            return result if result.strip() else "<i>(Тишина)</i>"
+            
+            if not result or not result.strip():
+                return "<i>(Распознано как пустое сообщение или тишина)</i>"
+
+            return result
 
         except Exception as e:
             logger.error(f"Ошибка Audio API: {e}", exc_info=True)
