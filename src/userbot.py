@@ -1,4 +1,8 @@
 import io
+import os
+import time
+import tempfile
+import subprocess
 import asyncio
 import qrcode
 import html
@@ -30,6 +34,7 @@ class Userbot:
         # Общий кэш для правок текста и транскрипций (для саммари)
         # {id: {"text": str, "peer": obj, "msg_id": int, "link": str}}
         self.data_cache = {}
+        self.recent_handled = {}
         self.MAX_MSG_LEN = 4000
 
     async def start(self):
@@ -59,38 +64,77 @@ class Userbot:
 
     async def reaction_handler(self, event):
         """Ловит вашу реакцию-триггер на сообщениях"""
-        if not isinstance(event, (types.UpdateEditMessage, types.UpdateEditChannelMessage)):
+        peer = None
+        msg_id = None
+        reactions_obj = None
+
+        if isinstance(event, (types.UpdateEditMessage, types.UpdateEditChannelMessage)):
+            msg_event = event.message
+            if msg_event and msg_event.reactions:
+                peer = msg_event.peer_id
+                msg_id = msg_event.id
+                reactions_obj = msg_event.reactions
+        elif isinstance(event, types.UpdateMessageReactions):
+            peer = event.peer
+            msg_id = event.msg_id
+            reactions_obj = event.reactions
+        else:
             return
-            
-        msg_event = event.message
-        if not msg_event or not msg_event.reactions:
+
+        if not peer or not msg_id or not reactions_obj:
             return
 
         target_found = False
         reactions_to_keep = []
-        
-        if msg_event.reactions.recent_reactions:
-            for r in msg_event.reactions.recent_reactions:
+
+        # 1. Проверяем в results (в группах, супергруппах и каналах Telegram передает реакцию текущего пользователя через chosen_order)
+        if reactions_obj.results:
+            for rc in reactions_obj.results:
+                if getattr(rc, "chosen_order", None) is not None:
+                    emoji = rc.reaction.emoticon if isinstance(rc.reaction, types.ReactionEmoji) else None
+                    if emoji == Config.TRIGGER_EMOJI:
+                        target_found = True
+                    else:
+                        reactions_to_keep.append(rc.reaction)
+
+        # 2. Также проверяем в recent_reactions (в ЛС и малых группах, где есть список peer_id)
+        if not target_found and reactions_obj.recent_reactions:
+            for r in reactions_obj.recent_reactions:
                 user_id = r.peer_id.user_id if isinstance(r.peer_id, types.PeerUser) else None
                 if user_id == self.my_id:
                     emoji = r.reaction.emoticon if isinstance(r.reaction, types.ReactionEmoji) else None
                     if emoji == Config.TRIGGER_EMOJI:
                         target_found = True
                     else:
-                        reactions_to_keep.append(r.reaction)
+                        if r.reaction not in reactions_to_keep:
+                            reactions_to_keep.append(r.reaction)
 
         if target_found:
-            # Убираем свою реакцию, чтобы не спамить
+            # Дедупликация (Telegram может прислать и UpdateMessageReactions, и UpdateEditMessage)
+            now = time.time()
+            clean_cutoff = now - 60
+            self.recent_handled = {k: v for k, v in self.recent_handled.items() if v > clean_cutoff}
+            try:
+                p_id = utils.get_peer_id(peer)
+            except Exception:
+                p_id = str(peer)
+            dedup_key = (p_id, msg_id)
+            if dedup_key in self.recent_handled and now - self.recent_handled[dedup_key] < 15:
+                return
+            self.recent_handled[dedup_key] = now
+
+            # Убираем свою реакцию, чтобы не спамить в чате
             try:
                 await self.client(functions.messages.SendReactionRequest(
-                    peer=msg_event.peer_id, 
-                    msg_id=msg_event.id, 
+                    peer=peer, 
+                    msg_id=msg_id, 
                     reaction=reactions_to_keep
                 ))
-            except: pass
+            except Exception as e:
+                logger.debug(f"SendReactionRequest failed: {e}")
             
             # Запускаем обработку в фоне
-            asyncio.create_task(self._dispatch_action(msg_event.peer_id, msg_event.id))
+            asyncio.create_task(self._dispatch_action(peer, msg_id))
 
     async def _dispatch_action(self, peer, msg_id):
         """Определяет тип контента и вызывает нужный модуль ИИ"""
@@ -98,33 +142,110 @@ class Userbot:
             m = await self.client.get_messages(peer, ids=msg_id)
             if not m: return
 
-            if m.voice or m.video_note:
+            is_media = (
+                bool(m.voice or m.video_note or m.audio or m.video)
+                or bool(m.document and getattr(m.document, "mime_type", "").startswith(("audio/", "video/")))
+            )
+
+            if is_media:
                 await self._handle_media(m)
             elif m.text:
                 await self._handle_text_fix(m)
         except Exception as e:
             logger.error(f"Ошибка диспетчера: {e}")
 
+    @staticmethod
+    def _extract_audio_sync(media_bytes: bytes, in_ext: str = ".mp4"):
+        """Извлекает аудиодорожку из видео или перекодирует в легкий моно MP3 16kHz."""
+        with tempfile.NamedTemporaryFile(suffix=in_ext, delete=False) as in_f:
+            in_f.write(media_bytes)
+            in_path = in_f.name
+        out_path = in_path + ".mp3"
+        try:
+            cmd = [
+                "ffmpeg", "-y", "-i", in_path,
+                "-vn",
+                "-ac", "1",
+                "-ar", "16000",
+                "-b:a", "48k",
+                out_path
+            ]
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if res.returncode == 0 and os.path.exists(out_path):
+                with open(out_path, "rb") as f:
+                    return f.read(), "extracted_voice.mp3", None
+            err_msg = res.stderr.decode("utf-8", errors="ignore")
+            if "does not contain any stream" in err_msg or "Output file is empty" in err_msg:
+                return None, in_ext, "no_audio"
+        except Exception as e:
+            logger.error(f"FFmpeg extraction error: {e}")
+        finally:
+            for p in (in_path, out_path):
+                if os.path.exists(p):
+                    try: os.remove(p)
+                    except: pass
+        return media_bytes, in_ext, None
+
     async def _handle_media(self, m):
         """Процесс транскрипции голосовых и кружочков"""
         try:
-            is_video = bool(m.video_note)
-            ext = "video.mp4" if is_video else "voice.ogg"
-            label = "Кружочек" if is_video else "Голосовое"
+            is_video_note = bool(m.video_note)
+            is_voice = bool(m.voice)
+            is_audio = bool(m.audio or (m.document and getattr(m.document, "mime_type", "").startswith("audio/")))
+            is_video = bool(m.video or (m.document and getattr(m.document, "mime_type", "").startswith("video/")))
+
+            if is_video_note:
+                label = "Кружочек"
+                ext = "video.mp4"
+            elif is_voice:
+                label = "Голосовое"
+                ext = "voice.ogg"
+            elif is_audio:
+                label = "Аудио"
+                ext = "audio.mp3"
+            elif is_video:
+                label = "Видео"
+                ext = "video.mp4"
+            else:
+                label = "Медиа"
+                ext = "media.ogg"
             
             chat = await m.get_chat()
             sender = await m.get_sender()
-            chat_title = getattr(chat, 'title', 'Личные сообщения')
+            chat_title = getattr(chat, 'title', None) or getattr(chat, 'first_name', 'Личные сообщения')
             s_name = utils.get_display_name(sender) if sender else "Неизвестный"
             msg_link = self._get_link(chat, m.id)
 
-            logger.info(f"Транскрипция {label} от {s_name}...")
+            file_size = getattr(m, 'file', None) and getattr(m.file, 'size', 0)
+            if file_size and file_size > 50 * 1024 * 1024:
+                size_mb = round(file_size / 1024 / 1024, 1)
+                logger.warning(f"Файл слишком большой ({size_mb} МБ)")
+                await self.bot_sender.send_message(
+                    chat_id=self.my_id,
+                    text=f"⚠️ Файл в чате <b>{html.escape(chat_title)}</b> слишком большой ({size_mb} МБ). Лимит для распознавания — 50 МБ.",
+                    buttons=[("🔗 Перейти", msg_link)]
+                )
+                return
+
+            logger.info(f"Транскрипция {label} от {s_name} в '{chat_title}'...")
             
             file_bytes = io.BytesIO()
             await self.client.download_media(m, file=file_bytes)
+            raw_media = file_bytes.getvalue()
             
-            # Получаем текст от Mistral Audio API
-            raw_text = await self.transcriber.transcribe(file_bytes.getvalue(), ext)
+            # Извлекаем аудиодорожку через ffmpeg для видео, кружочков и тяжелых файлов
+            if is_video or is_video_note or len(raw_media) > 10 * 1024 * 1024:
+                loop = asyncio.get_running_loop()
+                dot_ext = "." + ext.split(".")[-1]
+                extracted_data, audio_ext, err = await loop.run_in_executor(
+                    None, self._extract_audio_sync, raw_media, dot_ext
+                )
+                if err == "no_audio" or not extracted_data:
+                    raw_text = "<i>(В видео отсутствует звуковая дорожка)</i>"
+                else:
+                    raw_text = await self.transcriber.transcribe(extracted_data, audio_ext)
+            else:
+                raw_text = await self.transcriber.transcribe(raw_media, ext)
             
             # Кэшируем для возможного саммари
             item_id = str(uuid.uuid4())[:8]
